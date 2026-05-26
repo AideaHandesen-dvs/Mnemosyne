@@ -1,13 +1,13 @@
 import os
 #!/usr/bin/env python3
 """
-gen_topology.py - nine_worlds_spec.json から full_topology.mmd を生成する
+gen_topology.py - inventory.json から full_topology.mmd を生成する
 
 Usage:
     python3 gen_topology.py [--spec PATH] [--out PATH]
 
 Defaults:
-    --spec  ../nine_worlds_spec.json
+    --spec  ../inventory.json
     --out   ../full_topology.mmd
 """
 
@@ -270,8 +270,8 @@ def generate(spec_path: Path, out_path: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate full_topology.mmd from nine_worlds_spec.json")
-    parser.add_argument("--spec", default="../inventory.json", help="Path to nine_worlds_spec.json")
+    parser = argparse.ArgumentParser(description="Generate full_topology.mmd from inventory.json")
+    parser.add_argument("--spec", default="../inventory.json", help="Path to inventory.json")
     parser.add_argument("--out",  default="../full_topology.mmd",     help="Output path for full_topology.mmd")
     args = parser.parse_args()
 

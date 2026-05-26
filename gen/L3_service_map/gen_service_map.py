@@ -201,7 +201,7 @@ def generate_html(nodes, out_path):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>9-WORLDS L3 Service Map</title>
+<title>L3 Service Map</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
   body {{
@@ -250,7 +250,7 @@ def generate_html(nodes, out_path):
 </style>
 </head>
 <body>
-<h1>// 9-WORLDS L3 SERVICE MAP</h1>
+<h1>// L3 SERVICE MAP</h1>
 <div class="subtitle">Auto-generated from inventory.json</div>
 <table>
   <thead>
