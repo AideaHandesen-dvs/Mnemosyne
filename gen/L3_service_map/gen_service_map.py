@@ -135,7 +135,7 @@ def generate_html(nodes, out_path):
                         f'border-left:4px solid {c["stroke"]};'
                         f'background:{c["fill"]};color:{c["text"]};'
                         f'font-weight:600;font-size:11px;text-align:center;'
-                        f'writing-mode:vertical-rl;transform:rotate(180deg);'
+                        f'writing-mode:vertical-lr;'
                         f'padding:8px 4px;white-space:nowrap;">{label}</td>'
                     )
                     first_cat = False
