@@ -1,0 +1,32 @@
+# ============================================================
+# Personal data - NEVER commit these
+# ============================================================
+inventory.json
+
+# ============================================================
+# Generated outputs
+# ============================================================
+gen/L2_full_topology/full_topology.mmd
+gen/L3_service_map/service_map.mmd
+gen/L3_service_map/service_map.html
+gen/deploy.log
+
+# Catch any other generated Mermaid/HTML files in gen/
+gen/**/*.mmd
+gen/**/*.html
+gen/**/*.log
+
+# ============================================================
+# Environment / config overrides (if added later)
+# ============================================================
+.env
+.env.local
+config.local.sh
+
+# ============================================================
+# OS / editor noise
+# ============================================================
+.DS_Store
+Thumbs.db
+*.swp
+*~
