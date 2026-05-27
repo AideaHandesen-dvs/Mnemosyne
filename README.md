@@ -6,6 +6,8 @@
 
 [CloseCraw](https://github.com/AideaHandesen-dvs/CloseCraw)（Prometheus アラート→AI診断エージェント）と同じ `inventory.json` を共有して動作します。
 
+![Mnemosyne](assets/logo/logo.jpg)
+
 ## 概要
 
 ```
