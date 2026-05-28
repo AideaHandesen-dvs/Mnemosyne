@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-watch.py - cron/timer wrapper around reconcile.py  (HANDOFF §6.1).
+watch.py - cron/timer wrapper around reconcile.py.
 
 Now that reconcile reaches a clean baseline (3 MISSING, all EXPECTED-OFF;
 0 undoc / 0 failed / 0 unreachable), running it on a schedule turns drift into
