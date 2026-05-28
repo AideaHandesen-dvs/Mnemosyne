@@ -1,207 +1,549 @@
 #!/usr/bin/env python3
 """
-watch.py - cron/timer wrapper around reconcile.py  (HANDOFF §6.1).
+reconcile.py - diff the world model (inventory.json) against live host state.
 
-Now that reconcile reaches a clean baseline (3 MISSING, all EXPECTED-OFF;
-0 undoc / 0 failed / 0 unreachable), running it on a schedule turns drift into
-a *timeline*. The raw snapshots ARE the trouble history; the one-line log is the
-at-a-glance signal of WHEN something deviated and WHEN it cleared.
+This automates what we did by hand: ssh to each host, collect listening
+sockets (ss / netstat) and systemd unit states, then compare against what
+inventory.json *claims*. It surfaces three kinds of drift:
 
-Each run:
-  1. run reconcile.py --json  -> a timestamped snapshot under HISTORY/
-  2. refresh the canonical drift.json (so ask.py reads near-fresh w/o --probe)
-  3. classify CLEAN vs DRIFT using the SAME EXPECTED-OFF rule as ask.py
-     (a MISSING service whose lifecycle is on-demand/stream-only is NOT a fault)
-  4. diff significant findings vs the previous snapshot -> NEW / RESOLVED
-  5. append one line to drift.log; prune snapshots older than --keep-days
+  [MISSING]  inventory documents a port, nothing is listening on it
+  [UNDOC]    something is listening, inventory does not document it
+  [UNIT]     a systemd unit named in inventory is failed/inactive/disabled
 
-Philosophy unchanged from reconcile: observe, never act. No auto-fix, no notify.
-Wiring NEW-drift lines into the existing closecraw/Telegram path is a deliberate
-LATER step, not this one.
+Philosophy (learned the hard way): observation alone lies, intent alone lies.
+ss told us "process A owns 5004"; the unit file told us "service B wants 5004".
+Only the two together revealed the real story (a manual-toggle port share).
+So this tool reports raw observed state next to documented intent and lets a
+human (or the advisor LLM) reconcile - it does not silently "fix" anything.
 
-Runs where reconcile runs, as a user with key-based ssh to every host
-(BatchMode is already set in reconcile). reconcile.py is NOT modified; this is a
-sidecar, like reconcile_config.py / ask.py. stdlib only.
+OUT OF SCOPE for v0: cross-host flow verification (e.g. "is host A actually
+sending to host B:5004"). You can't see a UDP *sender* from a listen probe.
+That stays manual / future work.
 
-  ./watch.py                 # one scheduled run (what cron/timer calls); prints status line
-  ./watch.py --verbose       # also print the significant findings
-  ./watch.py --fail-on-drift # exit 1 when significant drift is present (for external alerting)
+Requires: python3 on the orchestrator, key-based ssh to each host.
+Run it from a host (e.g. your monitoring/orchestration box) where you already have ssh access.
 
---- install: systemd timer (preferred over cron — journald + clean env) -------
-  # /etc/systemd/system/mnemosyne-drift.service
-  [Unit]
-  Description=mnemosyne drift snapshot
-  [Service]
-  Type=oneshot
-  User=<operator-with-ssh-keys-to-all-hosts>
-  WorkingDirectory=/path/to/mnemosyne
-  ExecStart=/path/to/mnemosyne/watch.py
-
-  # /etc/systemd/system/mnemosyne-drift.timer
-  [Unit]
-  Description=run mnemosyne drift snapshot periodically
-  [Timer]
-  OnCalendar=*:0/30        # every 30 min; OnCalendar=hourly is fine too
-  Persistent=true          # catch up a run missed during downtime
-  [Install]
-  WantedBy=timers.target
-
-  systemctl enable --now mnemosyne-drift.timer
-  systemctl list-timers mnemosyne-drift.timer
-  journalctl -u mnemosyne-drift.service -n 20
-
---- or cron (must have a working non-interactive ssh env: passphraseless key, --
-    or an agent reachable from cron) -----------------------------------------
-  */30 * * * * /path/to/mnemosyne/watch.py >> /path/to/mnemosyne/history/run.err 2>&1
-
-Note: reconcile probes are lightweight (ss + systemctl) and do NOT touch the GPU,
-so this is safe to run during a live stream (unlike `ask.py --backend ollama`).
+  ./reconcile.py                      # probe all online hosts
+  ./reconcile.py --host nas           # one host
+  ./reconcile.py --json report.json   # also dump structured findings
+  ./reconcile.py --dry-run            # print remote commands, don't connect
 """
 
 import argparse
-import datetime
-import glob
 import json
-import os
+import re
 import shutil
+import socket
 import subprocess
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-
-# Same rule ask.py uses to decide a MISSING service is "止めてあるだけ" not a fault.
-EXPECTED_OFF_LIFECYCLES = {"on-demand", "stream-only"}
-
-
-def lifecycle_map(inventory):
-    """{(hostname, port): lifecycle} for services with a numeric port."""
-    return {(h["hostname"], s["port"]): s.get("lifecycle", "?")
-            for h in inventory["hosts"] for s in h.get("services", [])
-            if isinstance(s.get("port"), int)}
+# ---- site config (optional; drop a reconcile_config.py next to this file for
+# your deployment; the generic engine runs without it on neutral defaults) ----
+try:
+    import reconcile_config as _cfg
+except ImportError:
+    _cfg = None
 
 
-def significant_findings(results, lc):
-    """The exact surface ask.py treats as real drift, as a sorted list of stable
-    signature strings: INVESTIGATE missing, undoc, failed units, unreachable.
-    EXPECTED-OFF missing (on-demand/stream-only) is filtered out here."""
-    sig = []
-    for r in results:
-        host = r["host"]
-        for m in r.get("missing", []):
-            l = lc.get((host, m["port"]), "?")
-            if l in EXPECTED_OFF_LIFECYCLES:
-                continue
-            sig.append(f"{host} MISSING {'/'.join(m['services'])}:{m['port']}({l})")
-        for u in r.get("undoc", []):
-            sig.append(f"{host} UNDOC {u['port']}/{u.get('proto', '?')}->{u.get('proc', '?')}")
-        for un in r.get("units", []):
-            if un.get("active") == "failed":
-                sig.append(f"{host} UNIT-FAILED {un['unit']}")
-        if r.get("reachable") is False:
-            # error text (timeout vs refused) is left out of the signature so a
-            # flapping connection doesn't churn NEW/RESOLVED; it's still in the snapshot.
-            sig.append(f"{host} UNREACHABLE")
-    return sorted(sig)
+def _cfg_get(name, default):
+    return getattr(_cfg, name, default) if _cfg else default
 
 
-def run_reconcile(inventory_path, snap_path):
-    """Run reconcile.py, writing structured findings to snap_path. Returns the
-    parsed results list, or raises on a real engine failure."""
-    cmd = [sys.executable, os.path.join(HERE, "reconcile.py"),
-           "--inventory", inventory_path, "--json", snap_path, "--no-color"]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0 or not os.path.exists(snap_path):
-        raise RuntimeError((r.stderr or r.stdout or "reconcile.py failed").strip())
-    with open(snap_path, encoding="utf-8") as f:
-        return json.load(f)
+# Per-host ssh target overrides. Default target is the bare hostname (relies on
+# ~/.ssh/config / matching usernames). Site overrides (e.g. root@ for OpenWrt
+# boxes) live in reconcile_config.SSH_TARGETS.
+SSH_TARGETS = _cfg_get("SSH_TARGETS", {})
+# Host whose /etc/hosts is the DHCP/naming authority (used by --hosts).
+# None => --hosts requires --hosts-file.
+HOSTS_SOURCE = _cfg_get("HOSTS_SOURCE", None)
+# Primary LAN prefix; subnets outside it are highlighted in --hosts.
+# None => no subnet is treated as "primary" (nothing highlighted).
+PRIMARY_SUBNET_PREFIX = _cfg_get("PRIMARY_SUBNET_PREFIX", None)
+
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
+            "-o", "StrictHostKeyChecking=accept-new"]
+
+UNIT_RE = re.compile(r'users:\(\("([^"]+)",pid=(\d+)')
+# unit name charset, to keep remote shell injection-safe
+SAFE_UNIT = re.compile(r'^[A-Za-z0-9@._-]+$')
+
+# is-enabled values that mean "this really is a systemd unit"
+REAL_UNIT_ENABLED = {
+    "enabled", "enabled-runtime", "disabled", "static", "indirect",
+    "generated", "transient", "masked", "alias",
+}
+
+# Noise filtering for the [UNDOC] bucket (suppressed unless --all).
+EPHEMERAL_MIN = 32768  # Linux 32768-60999 + Windows 49152-65535 dynamic ranges
+NOISE_PORTS = {        # generic OS plumbing / discovery, not meaningful services
+    25, 67, 68, 123, 135, 137, 138, 139, 323, 500, 546,
+    631, 848, 1900, 3702, 4500, 5040, 5050, 5353, 5355, 5357,
+} | set(_cfg_get("EXTRA_NOISE_PORTS", set()))  # site-specific additions, if any
+
+# Statuses that mean "intentionally not running" -> skip in bulk runs (an
+# explicit --host still probes them, e.g. when you power the device on).
+NOT_RUNNING = {"offline", "dormant"}
 
 
-def load_sig(path, lc):
+def color(s, c, on):
+    codes = {"red": 31, "yellow": 33, "green": 32, "cyan": 36, "grey": 90, "bold": 1}
+    return f"\033[{codes[c]}m{s}\033[0m" if on else s
+
+
+def os_class(host):
+    oss = (host.get("os") or "").lower()
+    if "openwrt" in oss or "friendlywrt" in oss:
+        return "openwrt"
+    if "windows" in oss:
+        return "windows"
+    return "linux"
+
+
+def ssh_target(host):
+    name = host["hostname"]
+    return SSH_TARGETS.get(name, name)
+
+
+def documented_ports(host):
+    """Return {port:int -> [service names]} for services with a numeric port."""
+    out = {}
+    for svc in host.get("services", []):
+        p = svc.get("port")
+        if isinstance(p, int):
+            out.setdefault(p, []).append(svc.get("name", "?"))
+    return out
+
+
+def candidate_units(host):
+    """Unit names worth checking: daemons with ports + system_services that are
+    actually system-level systemd units (NOT user units, kernel modules, etc.)."""
+    names = set()
+    for svc in host.get("services", []):
+        n = svc.get("name", "")
+        if SAFE_UNIT.match(n):
+            names.add(n)
+    for svc in host.get("system_services", []):
+        if (svc.get("type") == "systemd") and SAFE_UNIT.match(svc.get("name", "")):
+            names.add(svc["name"])
+    return sorted(names)
+
+
+# ---------- remote probe builders ----------
+
+def build_remote_cmd(oscls, units):
+    if oscls == "windows":
+        # netstat avoids powershell quoting hell; -ano gives state + pid
+        return "netstat -ano"
+    unit_loop = ""
+    if oscls == "linux" and units:
+        joined = " ".join(units)
+        unit_loop = (
+            'echo "@@UNITS@@"; for u in ' + joined + '; do '
+            'a=$(systemctl is-active "$u" 2>/dev/null); '
+            'b=$(systemctl is-enabled "$u" 2>/dev/null); '
+            'printf "%s %s %s\\n" "$u" "${a:-n/a}" "${b:-n/a}"; done; '
+        )
+    listen = ("(sudo -n ss -tulnp 2>/dev/null || ss -tulnp 2>/dev/null || "
+              "ss -tuln 2>/dev/null || netstat -tulnp 2>/dev/null)")
+    return (
+        'echo "@@OS@@"; uname -sr 2>/dev/null; '
+        'echo "@@LISTEN@@"; ' + listen + '; ' +
+        unit_loop +
+        'echo "@@END@@"'
+    )
+
+
+def run_ssh(target, remote_cmd, dry_run):
+    cmd = ["ssh"] + SSH_OPTS + [target, remote_cmd]
+    if dry_run:
+        return None, " ".join(cmd)
     try:
-        with open(path, encoding="utf-8") as f:
-            return set(significant_findings(json.load(f), lc))
-    except (OSError, json.JSONDecodeError):
-        return set()
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        return None, "TIMEOUT"
+    except FileNotFoundError:
+        sys.exit("error: ssh client not found on this machine")
+    if r.returncode != 0 and not r.stdout:
+        return None, (r.stderr.strip() or f"ssh exit {r.returncode}")
+    return r.stdout, None
 
 
-def prune(history_dir, keep_days):
-    if keep_days <= 0:
-        return 0
-    cutoff = datetime.datetime.now().timestamp() - keep_days * 86400
-    removed = 0
-    for p in glob.glob(os.path.join(history_dir, "drift-*.json")):
-        try:
-            if os.path.getmtime(p) < cutoff:
-                os.remove(p)
-                removed += 1
-        except OSError:
-            pass
-    return removed
+def run_local(remote_cmd, dry_run):
+    """Run the probe on the orchestrator's own host (no ssh to self)."""
+    if dry_run:
+        return None, "LOCAL sh -c " + remote_cmd
+    try:
+        r = subprocess.run(["sh", "-c", remote_cmd],
+                           capture_output=True, text=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        return None, "TIMEOUT"
+    if not r.stdout:
+        return None, (r.stderr.strip() or f"local exit {r.returncode}")
+    return r.stdout, None
+
+
+# ---------- parsers ----------
+
+def parse_port(local_field):
+    """Extract integer port from a Local Address:Port token."""
+    # strip interface suffix like 127.0.0.53%lo, keep last :port
+    if ":" not in local_field:
+        return None, None
+    addr, _, port = local_field.rpartition(":")
+    addr = addr.strip("[]")
+    try:
+        return int(port), addr
+    except ValueError:
+        return None, None
+
+
+def parse_unix_listen(text):
+    """Parse ss OR netstat output -> {port: {'proto','proc','scope'}}.
+
+    Handles three real formats seen in this fleet:
+      - ss -tulnp      : 'tcp LISTEN 0 0 0.0.0.0:80 ... users:(("nginx"...'
+      - ss -ulnp       : 'UNCONN 0 0 0.0.0.0:5004 ...'        (State-led, no Netid)
+      - busybox netstat: 'tcp 0 0 0.0.0.0:80 0.0.0.0:* LISTEN' (TCP has State at END)
+                         'udp 0 0 0.0.0.0:53 0.0.0.0:*'        (UDP has NO State col)
+    Strategy: identify proto from the first proto-like token. A row counts as a
+    listening/bound socket if it has LISTEN/UNCONN anywhere OR it is a udp row
+    (busybox udp servers have no state word). The local addr is the first
+    addr:port token with a numeric port; the peer token uses '*' and is skipped.
+    """
+    found = {}
+    for line in text.splitlines():
+        toks = line.split()
+        if not toks:
+            continue
+        # skip headers
+        if toks[0] in ("Active", "Proto", "Netid", "State"):
+            continue
+        proto_raw = next((t.lower() for t in toks[:2]
+                          if t.lower() in ("tcp", "udp", "tcp6", "udp6")), "")
+        is_udp = proto_raw.startswith("udp")
+        has_listen = any(t.upper() == "LISTEN" for t in toks)
+        has_unconn = any(t.upper() == "UNCONN" for t in toks)
+        # UNCONN always means a bound (udp) socket, even without a proto token
+        if has_unconn:
+            is_udp = True
+        # accept: explicit LISTEN/UNCONN, OR a udp row (busybox udp has no state)
+        if not (has_listen or has_unconn or is_udp):
+            continue
+        # a tcp row carrying a non-LISTEN state (ESTAB etc.) is not a server
+        if not is_udp and not has_listen and any(
+                t.upper() in ("ESTAB", "TIME-WAIT", "CLOSE-WAIT", "SYN-SENT") for t in toks):
+            continue
+        local = None
+        for t in toks:
+            # Local addr is the first token with a NUMERIC port. Don't blanket-skip
+            # tokens containing '*': the peer column (*:*  0.0.0.0:*  [::]:*) is
+            # already rejected because parse_port() fails on a '*' port, while a
+            # dual-stack listen addr shown by ss as '*:9100' is a real local addr.
+            if ":" in t:
+                port, addr = parse_port(t)
+                if port is not None:
+                    local = (port, addr)
+                    break
+        if local is None:
+            continue
+        port, addr = local
+        proto = ("udp" if is_udp else "tcp") if proto_raw else ("udp" if is_udp else "tcp")
+        m = UNIT_RE.search(line)
+        proc = m.group(1) if m else ""
+        scope = "localhost" if addr in ("127.0.0.1", "::1", "localhost") else "any"
+        cur = found.get(port)
+        if not cur or (not cur["proc"] and proc):
+            found[port] = {"proto": proto, "proc": proc, "scope": scope}
+    return found
+
+
+def parse_windows_netstat(text):
+    found = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        proto = parts[0].lower()
+        if proto not in ("tcp", "udp"):
+            continue
+        local = parts[1]
+        port, addr = parse_port(local)
+        if port is None:
+            continue
+        if proto == "tcp" and (len(parts) < 4 or parts[3].upper() != "LISTENING"):
+            continue
+        scope = "localhost" if addr in ("127.0.0.1", "::1") else "any"
+        found.setdefault(port, {"proto": proto, "proc": "", "scope": scope})
+    return found
+
+
+def parse_units(text):
+    states = {}
+    for line in text.splitlines():
+        p = line.split()
+        if len(p) == 3:
+            name, active, enabled = p
+            states[name] = (active, enabled)
+    return states
+
+
+# ---------- host-level drift (inventory vs the naming authority's /etc/hosts) ----------
+
+MOBILE_HINT = re.compile(r'(pixel|iphone|ipad|android|phone|watch)', re.I)
+
+
+def parse_etc_hosts(text):
+    """Return [(ip, [names...])] from /etc/hosts, skipping loopback/ipv6 mcast."""
+    out = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        ip, names = parts[0], parts[1:]
+        if not names:
+            continue
+        if ip.startswith(("127.", "::1", "ff02", "fe80")):
+            continue
+        out.append((ip, names))
+    return out
+
+
+def host_drift(inv_hosts, hosts_text, use_color):
+    c = lambda s, col: color(s, col, use_color)
+    canon = {}
+    for ip, names in parse_etc_hosts(hosts_text):
+        canon[names[0]] = ip
+    inv_ip = {h["hostname"]: h.get("ip") for h in inv_hosts}
+    inv_names = set(inv_ip)
+    canon_names = set(canon)
+
+    print(c("\nhost-level drift (inventory vs naming authority /etc/hosts)", "bold"))
+
+    new = sorted(canon_names - inv_names)
+    for n in new:
+        hint = "  (mobile client?)" if MOBILE_HINT.search(n) else ""
+        print("  " + c(f"[NEW]     {n} ({canon[n]}) in DHCP, not in inventory{hint}", "cyan"))
+
+    only_inv = sorted(inv_names - canon_names)
+    for n in only_inv:
+        ip = inv_ip[n] or "?"
+        print("  " + c(f"[ABSENT]  {n} ({ip}) in inventory, not in DHCP "
+                       f"(static/offline?)", "grey"))
+
+    for n in sorted(inv_names & canon_names):
+        if inv_ip[n] and inv_ip[n] not in ("unknown", None) and inv_ip[n] != canon[n]:
+            print("  " + c(f"[IP]      {n}: inventory {inv_ip[n]} != DHCP {canon[n]}", "yellow"))
+
+    subnets = {}
+    for ip in canon.values():
+        net = ".".join(ip.split(".")[:3]) + ".0/24"
+        subnets[net] = subnets.get(net, 0) + 1
+    print(c("  subnets seen: ", "bold"), end="")
+    parts = []
+    for net, cnt in sorted(subnets.items()):
+        s = f"{net}({cnt})"
+        # highlight non-primary subnets; if no primary configured, highlight none
+        if PRIMARY_SUBNET_PREFIX and not net.startswith(PRIMARY_SUBNET_PREFIX):
+            s = c(s, "yellow")
+        parts.append(s)
+    print(", ".join(parts))
+    print("\n" + c("summary: ", "bold") +
+          f"{len(new)} new, {len(only_inv)} absent, {len(subnets)} subnet(s)")
+
+
+def split_sections(stdout):
+    secs = {"OS": "", "LISTEN": "", "UNITS": ""}
+    cur = None
+    for line in stdout.splitlines():
+        if line.startswith("@@OS@@"):
+            cur = "OS"; continue
+        if line.startswith("@@LISTEN@@"):
+            cur = "LISTEN"; continue
+        if line.startswith("@@UNITS@@"):
+            cur = "UNITS"; continue
+        if line.startswith("@@END@@"):
+            cur = None; continue
+        if cur:
+            secs[cur] += line + "\n"
+    return secs
+
+
+# ---------- reconcile one host ----------
+
+def reconcile_host(host, dry_run, show_all=False, local_name=None):
+    oscls = os_class(host)
+    target = ssh_target(host)
+    units = candidate_units(host) if oscls == "linux" else []
+    remote = build_remote_cmd(oscls, units)
+
+    is_local = local_name and host["hostname"].lower() == local_name.lower()
+    if is_local:
+        stdout, err = run_local(remote, dry_run)
+        target = "localhost"
+    else:
+        stdout, err = run_ssh(target, remote, dry_run)
+
+    result = {"host": host["hostname"], "os": oscls, "target": target,
+              "reachable": None, "missing": [], "undoc": [], "units": [],
+              "hidden": 0, "error": None, "dry_cmd": None}
+
+    if dry_run:
+        result["dry_cmd"] = err
+        return result
+    if stdout is None:
+        result["reachable"] = False
+        result["error"] = err
+        return result
+    result["reachable"] = True
+
+    if oscls == "windows":
+        listening = parse_windows_netstat(stdout)
+        unit_states = {}
+    else:
+        secs = split_sections(stdout)
+        listening = parse_unix_listen(secs["LISTEN"])
+        unit_states = parse_units(secs["UNITS"])
+
+    doc = documented_ports(host)
+    doc_ports = set(doc.keys())
+    live_ports = set(listening.keys())
+
+    # [MISSING] documented but not listening (never filtered - high value)
+    for p in sorted(doc_ports - live_ports):
+        result["missing"].append({"port": p, "services": doc[p]})
+
+    # [UNDOC] listening but not documented; suppress noise unless show_all
+    for p in sorted(live_ports - doc_ports):
+        info = listening[p]
+        noise = (p >= EPHEMERAL_MIN or p in NOISE_PORTS
+                 or info["scope"] == "localhost")
+        if noise and not show_all:
+            result["hidden"] += 1
+            continue
+        result["undoc"].append({"port": p, "proc": info["proc"] or "?",
+                                 "proto": info["proto"], "scope": info["scope"]})
+
+    # [UNIT] state of named units
+    for name, (active, enabled) in sorted(unit_states.items()):
+        if enabled not in REAL_UNIT_ENABLED and active in ("n/a", "unknown", "inactive"):
+            continue  # not actually a systemd unit (docker/manual/typo)
+        result["units"].append({"unit": name, "active": active, "enabled": enabled})
+    return result
+
+
+# ---------- reporting ----------
+
+def print_report(results, use_color):
+    c = lambda s, col: color(s, col, use_color)
+    total = {"missing": 0, "undoc": 0, "failed": 0, "unreach": 0, "hidden": 0}
+
+    for r in results:
+        head = f"{r['host']}  ({r['os']}, via {r['target']})"
+        print("\n" + c(head, "bold"))
+        if r.get("dry_cmd"):
+            print("  " + c(r["dry_cmd"], "grey")); continue
+        if not r["reachable"]:
+            total["unreach"] += 1
+            print("  " + c(f"[UNREACHABLE] {r['error']}", "red")); continue
+
+        total["hidden"] += r.get("hidden", 0)
+        if not (r["missing"] or r["undoc"] or any(
+                u["active"] == "failed" for u in r["units"])):
+            print("  " + c("clean - inventory matches live state", "green"))
+
+        for m in r["missing"]:
+            total["missing"] += 1
+            print("  " + c(f"[MISSING] :{m['port']} documented "
+                           f"({', '.join(m['services'])}) but nothing listening", "yellow"))
+        for u in r["undoc"]:
+            total["undoc"] += 1
+            loc = "  (localhost)" if u["scope"] == "localhost" else ""
+            print("  " + c(f"[UNDOC]   :{u['port']}/{u['proto']} listening "
+                           f"-> {u['proc']}{loc}, not in inventory", "cyan"))
+        for u in r["units"]:
+            if u["active"] == "failed":
+                total["failed"] += 1
+                print("  " + c(f"[UNIT]    {u['unit']}: FAILED "
+                               f"(enabled={u['enabled']})", "red"))
+            else:
+                print("  " + c(f"[unit]    {u['unit']}: {u['active']} / {u['enabled']}", "grey"))
+
+    extra = ""
+    if total["hidden"]:
+        extra = f"  ({total['hidden']} noise/ephemeral/localhost hidden; --all to show)"
+    print("\n" + c("summary: ", "bold") +
+          f"{total['missing']} missing, {total['undoc']} undocumented, "
+          f"{total['failed']} failed units, {total['unreach']} unreachable" + extra)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="scheduled reconcile snapshot + drift timeline")
-    ap.add_argument("--inventory", default=os.path.join(HERE, "inventory.json"))
-    ap.add_argument("--drift", default=os.path.join(HERE, "drift.json"),
-                    help="canonical latest snapshot ask.py reads (kept fresh each run)")
-    ap.add_argument("--history", default=os.path.join(HERE, "history"),
-                    help="dir for timestamped snapshots + drift.log")
-    ap.add_argument("--keep-days", type=int, default=30, help="prune snapshots older than this (0=keep all)")
-    ap.add_argument("--verbose", action="store_true", help="also print the significant findings")
-    ap.add_argument("--fail-on-drift", action="store_true", help="exit 1 if significant drift present")
+    ap = argparse.ArgumentParser(description="diff inventory.json vs live hosts")
+    ap.add_argument("--inventory", default="inventory.json")
+    ap.add_argument("--host", help="only probe this hostname")
+    ap.add_argument("--json", metavar="PATH", help="dump findings as JSON")
+    ap.add_argument("--dry-run", action="store_true", help="print ssh commands only")
+    ap.add_argument("--all", action="store_true",
+                    help="show ephemeral/localhost/OS-noise ports too")
+    ap.add_argument("--hosts", action="store_true",
+                    help="host-level drift: diff inventory against the naming authority's /etc/hosts")
+    ap.add_argument("--hosts-file", metavar="PATH",
+                    help="read /etc/hosts from a local copy instead of fetching from the naming authority")
+    ap.add_argument("--include-clients", action="store_true",
+                    help="also probe class:client/iot hosts (phones, ESP32, etc.)")
+    ap.add_argument("--no-color", action="store_true")
     args = ap.parse_args()
 
-    os.makedirs(args.history, exist_ok=True)
-    log_path = os.path.join(args.history, "drift.log")
-    now = datetime.datetime.now()
-    snap_path = os.path.join(args.history, f"drift-{now:%Y%m%d-%H%M%S}.json")
+    use_color = (not args.no_color) and sys.stdout.isatty()
+    local_name = socket.gethostname().split(".")[0]
 
-    with open(args.inventory, encoding="utf-8") as f:
-        inventory = json.load(f)
-    lc = lifecycle_map(inventory)
+    with open(args.inventory) as f:
+        data = json.load(f)
+    hosts = data["hosts"] if isinstance(data, dict) else data
 
-    # previous = newest existing snapshot, captured BEFORE we write the new one
-    existing = sorted(glob.glob(os.path.join(args.history, "drift-*.json")))
-    prev_sig = load_sig(existing[-1], lc) if existing else set()
+    if args.hosts:
+        if args.hosts_file:
+            with open(args.hosts_file) as f:
+                txt = f.read()
+        elif HOSTS_SOURCE:
+            src = SSH_TARGETS.get(HOSTS_SOURCE, HOSTS_SOURCE)
+            txt, err = run_ssh(src, "cat /etc/hosts", args.dry_run)
+            if txt is None:
+                sys.exit(f"could not fetch {HOSTS_SOURCE} /etc/hosts: {err}\n"
+                         f"(fix the {HOSTS_SOURCE} host key, or pass --hosts-file)")
+        else:
+            sys.exit("--hosts needs a naming authority: set HOSTS_SOURCE in "
+                     "reconcile_config.py, or pass --hosts-file")
+        host_drift(hosts, txt, use_color)
+        return
 
-    try:
-        results = run_reconcile(args.inventory, snap_path)
-    except RuntimeError as e:
-        line = f"{now:%Y-%m-%d %H:%M:%S} ERROR reconcile failed: {e}"
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-        print(line, file=sys.stderr)
-        sys.exit(2)
+    targets = []
+    for h in hosts:
+        if args.host and h["hostname"] != args.host:
+            continue
+        if h.get("status") in NOT_RUNNING and not args.host:
+            continue  # intentionally off (offline/dormant); --host overrides
+        if h.get("class") in ("client", "iot") and not args.include_clients:
+            continue  # phones / ESP32 etc. are not SSH-able infra
+        if (h.get("ip") in (None, "unknown")) and h["hostname"] not in SSH_TARGETS:
+            # no ip and not an ssh-config alias we know -> skip
+            continue
+        targets.append(h)
 
-    shutil.copyfile(snap_path, args.drift)  # refresh the canonical latest
+    if not targets:
+        sys.exit("no probeable hosts matched")
 
-    sig = set(significant_findings(results, lc))
-    new = sorted(sig - prev_sig)
-    resolved = sorted(prev_sig - sig)
+    if not shutil.which("ssh") and not args.dry_run:
+        sys.exit("error: ssh not found")
 
-    status = "CLEAN" if not sig else f"DRIFT({len(sig)})"
-    parts = [f"{now:%Y-%m-%d %H:%M:%S}", status]
-    if sig:
-        parts.append("; ".join(sorted(sig)))
-    if new:
-        parts.append("+NEW[" + "; ".join(new) + "]")
-    if resolved:
-        parts.append("-RESOLVED[" + "; ".join(resolved) + "]")
-    line = " ".join(parts)
+    results = [reconcile_host(h, args.dry_run, show_all=args.all,
+                              local_name=local_name) for h in targets]
+    print_report(results, use_color)
 
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
-
-    pruned = prune(args.history, args.keep_days)
-
-    print(line)
-    if args.verbose and sig:
-        print("\n".join("  " + s for s in sorted(sig)))
-    if pruned:
-        print(f"# pruned {pruned} snapshot(s) older than {args.keep_days}d", file=sys.stderr)
-
-    if args.fail_on_drift and sig:
-        sys.exit(1)
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        print(f"\nwrote {args.json}")
 
 
 if __name__ == "__main__":
