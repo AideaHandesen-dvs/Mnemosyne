@@ -30,3 +30,8 @@ config.local.sh
 Thumbs.db
 *.swp
 *~
+
+# reconcile/watch runtime + site config
+drift.json
+history/
+reconcile_config.py
