@@ -1,0 +1,365 @@
+[
+  {
+    "hostname": "router",
+    "hardware": "Example ARM Router Board",
+    "ip": "192.168.1.1",
+    "os": "OpenWrt 24.10.0 r28000-000000000",
+    "arch": "aarch64",
+    "kernel": "6.1.0",
+    "cpu": "Example SoC (Cortex-A55 x4)",
+    "cores": "4",
+    "memory_mb": 512,
+    "disks": "/dev/mmcblk0p10 16G",
+    "gpu": "none",
+    "ssh_user": "root",
+    "role": "Gateway / Firewall / OpenWrt",
+    "services": [
+      {
+        "name": "uhttpd",
+        "port": 80,
+        "protocol": "http",
+        "public": false,
+        "description": "LuCI admin panel"
+      },
+      {
+        "name": "uhttpd",
+        "port": 443,
+        "protocol": "https",
+        "public": false,
+        "description": "LuCI admin panel (HTTPS)"
+      },
+      {
+        "name": "AdGuardHome",
+        "port": 53,
+        "protocol": "dns",
+        "public": false,
+        "description": "DNS server / ad blocker"
+      },
+      {
+        "name": "AdGuardHome",
+        "port": 3030,
+        "protocol": "http",
+        "public": false,
+        "description": "AdGuard Home admin panel"
+      },
+      {
+        "name": "dropbear",
+        "port": 22,
+        "protocol": "tcp",
+        "public": false,
+        "description": "SSH"
+      }
+    ]
+  },
+  {
+    "hostname": "ap01",
+    "hardware": "Example Wi-Fi AP (OpenWrt capable)",
+    "ip": "192.168.1.2",
+    "os": "OpenWrt 23.05.3 r23000-000000000",
+    "arch": "aarch64",
+    "kernel": "5.15.0",
+    "cpu": "Example MIPS/ARM SoC x2",
+    "cores": "2",
+    "memory_mb": 256,
+    "disks": "16MB flash",
+    "gpu": "none",
+    "ssh_user": "root",
+    "role": "Wi-Fi Access Point / OpenWrt",
+    "services": [
+      {
+        "name": "uhttpd",
+        "port": 80,
+        "protocol": "http",
+        "public": false,
+        "description": "LuCI admin panel"
+      },
+      {
+        "name": "dropbear",
+        "port": 22,
+        "protocol": "tcp",
+        "public": false,
+        "description": "SSH"
+      }
+    ]
+  },
+  {
+    "hostname": "nas",
+    "hardware": "Example Desktop PC (NAS)",
+    "ip": "192.168.1.10",
+    "os": "Debian GNU/Linux 12 (bookworm)",
+    "arch": "x86_64",
+    "kernel": "6.1.0-amd64",
+    "cpu": "Intel Core i3-xxxx @ 3.30GHz",
+    "cores": "4",
+    "memory_gb": 8,
+    "disks": "sda 2TB\nsdb 2TB",
+    "gpu": "Intel HD Graphics",
+    "ssh_user": "alice",
+    "role": "NAS / OpenMediaVault",
+    "services": [
+      {
+        "name": "nginx",
+        "port": 80,
+        "protocol": "http",
+        "public": false,
+        "description": "OpenMediaVault admin panel"
+      },
+      {
+        "name": "smbd",
+        "port": 445,
+        "protocol": "tcp",
+        "public": false,
+        "description": "Samba SMB file share"
+      },
+      {
+        "name": "nfs",
+        "port": 2049,
+        "protocol": "tcp",
+        "public": false,
+        "description": "NFSv4 file share"
+      },
+      {
+        "name": "ssh",
+        "port": 22,
+        "protocol": "tcp",
+        "public": false,
+        "description": "Remote login"
+      }
+    ]
+  },
+  {
+    "hostname": "proxy",
+    "hardware": "Example Desktop PC (Proxy)",
+    "ip": "192.168.1.20",
+    "os": "Debian GNU/Linux 12 (bookworm)",
+    "arch": "x86_64",
+    "kernel": "6.1.0-amd64",
+    "cpu": "Intel Core i3-xxxx @ 3.60GHz",
+    "cores": "4",
+    "memory_gb": 4,
+    "disks": "sda 120G",
+    "gpu": "Intel HD Graphics",
+    "ssh_user": "alice",
+    "role": "Reverse Proxy / Auth / Monitor",
+    "services": [
+      {
+        "name": "apache2",
+        "port": 80,
+        "protocol": "http",
+        "public": true,
+        "description": "Dashboard / public HTML"
+      },
+      {
+        "name": "prometheus",
+        "port": 9090,
+        "protocol": "http",
+        "public": false,
+        "description": "Metrics collection"
+      },
+      {
+        "name": "grafana",
+        "port": 3000,
+        "protocol": "http",
+        "public": false,
+        "description": "Metrics visualization"
+      },
+      {
+        "name": "ssh",
+        "port": 22,
+        "protocol": "tcp",
+        "public": false,
+        "description": "Remote login"
+      }
+    ]
+  },
+  {
+    "hostname": "gameserver",
+    "hardware": "Example Desktop PC (Game Server)",
+    "ip": "192.168.1.30",
+    "os": "Debian GNU/Linux 12 (bookworm)",
+    "arch": "x86_64",
+    "kernel": "6.1.0-amd64",
+    "cpu": "Intel Core i7-xxxx @ 3.40GHz",
+    "cores": "8",
+    "memory_gb": 16,
+    "disks": "sda 120G\nsdb 1TB",
+    "gpu": "Intel HD Graphics",
+    "ssh_user": "alice",
+    "role": "Game Server (Minecraft / Terraria / Factorio)",
+    "services": [
+      {
+        "name": "minecraft",
+        "port": 25565,
+        "protocol": "tcp",
+        "public": true,
+        "description": "Minecraft Paper Server"
+      },
+      {
+        "name": "terraria",
+        "port": 7777,
+        "protocol": "tcp",
+        "public": true,
+        "description": "Terraria Server (Docker)"
+      },
+      {
+        "name": "factorio",
+        "port": 34197,
+        "protocol": "udp",
+        "public": true,
+        "description": "Factorio Server (Docker)"
+      },
+      {
+        "name": "ssh",
+        "port": 22,
+        "protocol": "tcp",
+        "public": false,
+        "description": "Remote login"
+      }
+    ]
+  },
+  {
+    "hostname": "aibox",
+    "hardware": "Example Workstation (AI Inference)",
+    "ip": "192.168.1.99",
+    "os": "Debian GNU/Linux 13 (trixie)",
+    "arch": "x86_64",
+    "kernel": "6.12.0-amd64",
+    "cpu": "Intel Core i9-xxxx @ 3.60GHz",
+    "cores": "16",
+    "memory_gb": 64,
+    "disks": "sda 120G\nsdb 1TB",
+    "gpu": "NVIDIA GeForce RTX 3060 12GB",
+    "ssh_user": "alice",
+    "role": "AI Inference / Streaming Core (Ollama / SD / VoiceVox / OBS)",
+    "services": [
+      {
+        "name": "ollama",
+        "port": 11434,
+        "protocol": "http",
+        "public": false,
+        "description": "LLM inference engine"
+      },
+      {
+        "name": "voicevox-engine",
+        "port": 50021,
+        "protocol": "http",
+        "public": false,
+        "description": "VOICEVOX TTS engine (GPU inference)"
+      },
+      {
+        "name": "obs",
+        "port": 4455,
+        "protocol": "ws",
+        "public": false,
+        "description": "OBS WebSocket"
+      },
+      {
+        "name": "ssh",
+        "port": 22,
+        "protocol": "tcp",
+        "public": false,
+        "description": "Remote login"
+      }
+    ]
+  },
+  {
+    "hostname": "windesk",
+    "hardware": "Example Desktop PC (Windows)",
+    "ip": "192.168.1.100",
+    "os": "Windows 10 Enterprise LTSC (Build 19044)",
+    "arch": "x86_64",
+    "kernel": "10.0.19044",
+    "cpu": "Intel Core i7-xxxx @ 3.40GHz",
+    "cores": "8",
+    "memory_gb": 16,
+    "disks": "0:120GB",
+    "gpu": "NVIDIA GeForce GTX 1660",
+    "ssh_user": "Alice",
+    "role": "Streaming Client / Avatar / OBS",
+    "services": [
+      {
+        "name": "obs",
+        "port": 5960,
+        "protocol": "tcp",
+        "public": false,
+        "description": "OBS WebSocket"
+      },
+      {
+        "name": "UltraVNC",
+        "port": 5900,
+        "protocol": "vnc",
+        "public": false,
+        "description": "VNC remote desktop"
+      },
+      {
+        "name": "ssh",
+        "port": 22,
+        "protocol": "tcp",
+        "public": false,
+        "description": "OpenSSH (Windows)"
+      },
+      {
+        "name": "smb",
+        "port": 445,
+        "protocol": "tcp",
+        "public": false,
+        "description": "Windows file share"
+      }
+    ]
+  },
+  {
+    "hostname": "ntp",
+    "hardware": "Raspberry Pi 4 Model B",
+    "ip": "192.168.1.254",
+    "os": "Debian GNU/Linux 13 (trixie)",
+    "arch": "aarch64",
+    "kernel": "6.12.0-rpi-v8",
+    "cpu": "Raspberry Pi 4 (Cortex-A72 x4)",
+    "cores": "4",
+    "memory_gb": 1,
+    "disks": "mmcblk0 64G",
+    "gpu": "none",
+    "ssh_user": "alice",
+    "role": "Stratum 1 NTP Server (GPS+PPS)",
+    "services": [
+      {
+        "name": "chrony",
+        "port": 123,
+        "protocol": "udp",
+        "public": false,
+        "description": "NTP server (stratum 1, GPS+PPS)"
+      },
+      {
+        "name": "gpsd",
+        "port": 2947,
+        "protocol": "tcp",
+        "public": false,
+        "description": "GPS daemon (localhost only)"
+      },
+      {
+        "name": "ssh",
+        "port": 22,
+        "protocol": "tcp",
+        "public": false,
+        "description": "Remote login"
+      }
+    ]
+  },
+  {
+    "hostname": "oldlaptop",
+    "hardware": "Example Old Laptop",
+    "ip": "unknown",
+    "os": "unknown",
+    "arch": "x86_64",
+    "kernel": "unknown",
+    "cpu": "Intel Celeron xxxx @ 1.20GHz",
+    "cores": "2",
+    "memory_gb": 2,
+    "disks": "64GB SSD",
+    "gpu": "Intel GMA",
+    "ssh_user": "alice",
+    "role": "旧モバイル端末",
+    "status": "offline",
+    "services": []
+  }
+]
