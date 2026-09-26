@@ -121,4 +121,4 @@ DEPLOY_DIR="/srv/http/mnemosyne"
 
 ## ライセンス
 
-MIT
+MIT — 全文は [LICENSE](LICENSE)。
