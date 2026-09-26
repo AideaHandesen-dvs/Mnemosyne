@@ -4,7 +4,7 @@
 
 ホームラボのマシン構成を JSON で管理し、トポロジ図・サービスマップを自動生成するツール群です。
 
-[CloseCraw](https://github.com/<your-org>/CloseCraw)（Prometheus アラート→AI診断エージェント）と同じ `inventory.json` を共有して動作します。
+[CloseCraw](https://github.com/AideaHandesen-dvs/CloseCraw)（Prometheus アラート→AI診断エージェント）と同じ `inventory.json` を共有して動作します。
 
 ![Mnemosyne](assets/logo/logo.jpg)
 
@@ -18,9 +18,9 @@ collect/
   survey_the_worlds.sh  ← SSH で各ホストの情報を収集し inventory.json を更新
 
 gen/
-  build_topology.py     ← inventory.json → Mermaid トポロジ図 (L2)
-  build_service_map.py  ← inventory.json → サービスマップ HTML (L3)
-  deploy.sh             ← 生成物を Web サーバーへデプロイ
+  L2_full_topology/gen_topology.py    ← inventory.json → Mermaid トポロジ図 (L2)
+  L3_service_map/gen_service_map.py   ← inventory.json → サービスマップ HTML (L3)
+  deploy.sh                           ← 生成物を Web サーバーへデプロイ
 ```
 
 ## セットアップ
@@ -28,8 +28,8 @@ gen/
 ### 1. リポジトリをクローン
 
 ```bash
-git clone https://github.com/<your-org>/mnemosyne.git
-cd mnemosyne
+git clone https://github.com/AideaHandesen-dvs/Mnemosyne.git
+cd Mnemosyne
 ```
 
 ### 2. inventory.json を準備
@@ -84,11 +84,12 @@ OS 判定ロジック：
 
 ### 5. 図を生成・デプロイ
 
+リポジトリ直下から実行します（`--spec` / `--out` の既定値は cwd 依存なので明示します）。
+
 ```bash
-cd gen
-python3 build_topology.py   # → gen/L2_full_topology/full_topology.mmd
-python3 build_service_map.py  # → gen/L3_service_map/service_map.html
-bash deploy.sh              # → デプロイ先へコピー
+python3 gen/L2_full_topology/gen_topology.py --spec inventory.json --out gen/L2_full_topology/full_topology.mmd
+python3 gen/L3_service_map/gen_service_map.py --spec inventory.json --outdir gen/L3_service_map
+bash gen/deploy.sh   # → デプロイ先へコピー
 ```
 
 デプロイ先は `deploy.sh` 内の変数で設定します（後述）。
